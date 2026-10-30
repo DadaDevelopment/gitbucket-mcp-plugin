@@ -10,21 +10,5 @@ permissions:
 
 jobs:
   mirror:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mirror push to GitVerse
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GV_TOKEN: ${{ secrets.GITVERSE_TOKEN }}
-          GV_ACTOR: ${{ secrets.GITVERSE_ACTOR }}
-          GV_ORG:   ${{ secrets.GITVERSE_ORG }}
-        run: |
-          REPO="${{ github.event.repository.name }}"
-          OWNER="${{ github.event.repository.owner.login }}"
-          git clone --mirror \
-            "https://x-access-token:${GH_TOKEN}@github.com/${OWNER}/${REPO}.git" repo.git
-          cd repo.git
-          TARGET="https://${GV_ACTOR}:${GV_TOKEN}@gitverse.ru/${GV_ORG}/${REPO}.git"
-          git push --force "$TARGET" '+refs/heads/*:refs/heads/*'
-          git push --force "$TARGET" '+refs/tags/*:refs/tags/*'
-
+    uses: DadaDevelopment/gh-actions/.github/workflows/mirror-to-gitverse.yml@main
+    secrets: inherit
