@@ -2,6 +2,7 @@ package com.newsrx.mcpplugin.mcp
 
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.fasterxml.jackson.databind.node.ObjectNode
+import com.newsrx.mcpplugin.oauth.McpScope
 import gitbucket.core.model.Account
 import javax.servlet.http.HttpServletRequest
 
@@ -9,6 +10,19 @@ import javax.servlet.http.HttpServletRequest
 trait ToolDef {
   def name: String
   def description: String
+
+  /**
+   * The OAuth scope a caller needs to invoke this tool.
+   *
+   * Abstract rather than defaulting to [[McpScope.Read]]: a default would be
+   * the weaker requirement, so a new mutating tool that forgot to declare
+   * would be callable with a read-only grant and nothing would say so. This
+   * way it does not compile.
+   *
+   * It is one value feeding two places — the advertised policy in
+   * `tools/list` and the check in the dispatcher — so the two cannot drift.
+   */
+  def requiredScope: McpScope
 
   /** JSON Schema for the `arguments` object. */
   def inputSchema(mapper: ObjectMapper): ObjectNode
@@ -131,6 +145,9 @@ object ToolRegistry {
       new ClosePullRequestTool,
       new ReopenPullRequestTool,
       new GetPrDiffTool,
+      new GetThreadCommentsTool,
+      new UpdatePullRequestTool,
+      new MarkReadyForReviewTool,
       // Issue tools
       new ListIssuesTool,
       new GetIssueTool,
@@ -138,9 +155,12 @@ object ToolRegistry {
       new CloseIssueTool,
       new ReopenIssueTool,
       new AddIssueCommentTool,
+      new UpdateOwnCommentTool,
       // Repository tools
       new ListRepositoriesTool,
-      new GetRepositoryTool
+      new GetRepositoryTool,
+      // Identity
+      new WhoAmITool
     )
   }
 

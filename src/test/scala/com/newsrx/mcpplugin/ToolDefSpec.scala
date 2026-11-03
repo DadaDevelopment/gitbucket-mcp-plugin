@@ -132,6 +132,9 @@ class ToolDefSpec extends AnyFunSuite with Matchers {
   private object TestTool extends ToolDef {
     val name        = "test_tool"
     val description = "tool for testing helpers"
+    // Every tool must declare the scope it needs; the member is abstract so
+    // that a new one cannot silently inherit the weaker requirement.
+    val requiredScope = com.newsrx.mcpplugin.oauth.McpScope.Read
 
     def inputSchema(mapper: ObjectMapper) = objectSchema(mapper, Seq("x"),
       "x" -> strNode(mapper, "required string"))

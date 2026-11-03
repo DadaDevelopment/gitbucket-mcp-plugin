@@ -20,3 +20,5 @@ target/
 *.war
 *.ear
 !gradle-wrapper.jar
+__pycache__/
+*.pyc

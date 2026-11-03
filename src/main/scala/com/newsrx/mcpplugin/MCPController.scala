@@ -2,7 +2,8 @@ package com.newsrx.mcpplugin
 
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.newsrx.mcpplugin.mcp.{JsonRpc, ToolRegistry}
-import com.newsrx.mcpplugin.tools.SessionSupport
+import com.newsrx.mcpplugin.oauth._
+import com.newsrx.mcpplugin.tools.{AuthorizationError, SessionSupport}
 import gitbucket.core.controller.ControllerBase
 import gitbucket.core.model.Account
 import gitbucket.core.service.{AccountService, RepositoryService, SystemSettingsService}
@@ -15,27 +16,28 @@ class MCPController
     with AccountService
     with RepositoryService
     with SystemSettingsService
-    with SessionSupport {
+    with SessionSupport
+    with OAuthEndpoints {
 
   // ── Routes ────────────────────────────────────────────────────────────────
 
   post("/plugin-mcp/") {
     contentType = "application/json; charset=UTF-8"
-    withAuth { account =>
-      handleJsonRpc(account)
+    withAuth { caller =>
+      handleJsonRpc(caller)
     }
   }
 
   // Some MCP clients POST without trailing slash
   post("/plugin-mcp") {
     contentType = "application/json; charset=UTF-8"
-    withAuth { account =>
-      handleJsonRpc(account)
+    withAuth { caller =>
+      handleJsonRpc(caller)
     }
   }
 
   get("/plugin-mcp/sse") {
-    withAuth { account =>
+    withAuth { caller =>
       contentType = "text/event-stream; charset=UTF-8"
       response.setHeader("Cache-Control", "no-cache")
       response.setHeader("X-Accel-Buffering", "no")
@@ -53,7 +55,7 @@ class MCPController
 
   // ── JSON-RPC dispatch ─────────────────────────────────────────────────────
 
-  private def handleJsonRpc(account: Account): String = {
+  private def handleJsonRpc(caller: AuthenticatedCaller): String = {
     val body = request.body
     if (body.isEmpty) {
       return JsonRpc.errorResponse(mapper, None, JsonRpc.InvalidRequest, "empty request body")
@@ -79,7 +81,7 @@ class MCPController
             JsonRpc.successResponse(mapper, req.id, ToolRegistry.listResult(mapper))
 
           case "tools/call" =>
-            handleToolCall(account, req)
+            handleToolCall(caller, req)
 
           case "resources/list" =>
             // Resources not implemented — return empty list
@@ -102,7 +104,7 @@ class MCPController
     }
   }
 
-  private def handleToolCall(account: Account, req: JsonRpc.Request): String = {
+  private def handleToolCall(caller: AuthenticatedCaller, req: JsonRpc.Request): String = {
     val params = req.params.getOrElse(mapper.createObjectNode())
     val toolName = Option(params.get("name")).map(_.asText("")).getOrElse("")
     if (toolName.isEmpty) {
@@ -117,12 +119,29 @@ class MCPController
           mapper, req.id, JsonRpc.MethodNotFound,
           s"unknown tool: $toolName"
         )
+      case Some(tool) if !caller.permits(tool.requiredScope) =>
+        // Distinct from an authentication failure, and distinct in the HTTP
+        // status too: the credential is good, the consent is not wide enough.
+        // A client that is told "authenticate again" for this will loop.
+        oauthConfig.foreach { config =>
+          response.setHeader("WWW-Authenticate",
+            Metadata.challenge(config, Some(ChallengeError.InsufficientScope)))
+        }
+        response.setStatus(HttpServletResponse.SC_FORBIDDEN)
+        JsonRpc.errorResponse(mapper, req.id, JsonRpc.McpError - 3,
+          s"insufficient_scope: $toolName requires ${tool.requiredScope.name}")
+
       case Some(tool) =>
         val args = Option(params.get("arguments")).getOrElse(mapper.createObjectNode())
         try {
-          val result = tool.execute(args, account, request, mapper)
+          val result = tool.execute(args, caller.account, request, mapper)
           JsonRpc.successResponse(mapper, req.id, result)
         } catch {
+          // A denial is its own outcome, not an internal failure: reporting it
+          // as InternalError would tell a caller the server broke when in fact
+          // the server refused.
+          case e: AuthorizationError =>
+            JsonRpc.errorResponse(mapper, req.id, JsonRpc.McpError - 2, e.getMessage)
           case e: NoSuchElementException =>
             JsonRpc.errorResponse(mapper, req.id, JsonRpc.McpError - 1, e.getMessage)
           case e: IllegalArgumentException =>
@@ -157,7 +176,9 @@ class MCPController
 
     val serverInfo = mapper.createObjectNode()
     serverInfo.put("name",    "gitbucket-mcp-plugin")
-    serverInfo.put("version", "0.1.0")
+    // Reported from the descriptor that ships in the JAR instead of a second
+    // hardcoded literal: the two disagreed in v0.1.1.
+    serverInfo.put("version", PluginDescriptor.get("pluginVersion"))
 
     root.set[ObjectNode]("capabilities", capabilities)
     root.set[ObjectNode]("serverInfo",   serverInfo)
@@ -167,35 +188,98 @@ class MCPController
 
   // ── Authentication ────────────────────────────────────────────────────────
 
-  private def withAuth(f: Account => String): String = {
-    authenticate() match {
-      case None =>
-        response.setHeader("WWW-Authenticate", "Basic realm=\"GitBucket MCP\"")
-        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED)
+  private def withAuth(f: AuthenticatedCaller => String): String = {
+    authenticateCaller() match {
+      case Right(caller) => f(caller)
+      case Left(error) =>
         contentType = "application/json; charset=UTF-8"
-        JsonRpc.errorResponse(
-          mapper, None, JsonRpc.McpError, "authentication required"
-        )
-      case Some(account) =>
-        f(account)
+        response.setStatus(error.status)
+        response.setHeader("WWW-Authenticate", challengeHeader(error))
+        JsonRpc.errorResponse(mapper, None,
+          if (error == ChallengeError.None_) JsonRpc.McpError else JsonRpc.McpError - 4,
+          if (error == ChallengeError.None_) "authentication required" else error.description)
     }
   }
 
-  /** Extract and validate Basic auth credentials. */
-  private def authenticate(): Option[Account] =
-    Option(request.getHeader("Authorization")).flatMap { header =>
-      if (!header.startsWith("Basic ")) return None
-      try {
-        val decoded = new String(Base64.getDecoder.decode(header.drop(6).trim), "UTF-8")
-        val colon   = decoded.indexOf(':')
-        if (colon < 0) return None
-        val username = decoded.substring(0, colon)
-        val password = decoded.substring(colon + 1)
+  /**
+   * The challenge offered when authentication fails.
+   *
+   * Both schemes are offered when OAuth is configured, so a Basic client is
+   * not pushed into a browser flow it cannot perform and an OAuth client can
+   * still discover where to authorize.
+   */
+  private def challengeHeader(error: ChallengeError): String = {
+    val basic = "Basic realm=\"GitBucket MCP\""
+    oauthConfig match {
+      case Some(config) =>
+        val bearer = Metadata.challenge(config,
+          if (error == ChallengeError.None_) None else Some(error))
+        s"$bearer, $basic"
+      case None => basic
+    }
+  }
+
+  /**
+   * Resolve the caller from the Authorization header.
+   *
+   * One header, one scheme, one answer. A Bearer token that does not resolve
+   * is an error and never a reason to look somewhere else: falling back to
+   * the browser session would mean a stale or stolen token silently acting as
+   * whoever happens to be signed in, and falling back to Basic would let a
+   * client downgrade itself out of its own scope restrictions.
+   */
+  private def authenticateCaller(): Either[ChallengeError, AuthenticatedCaller] =
+    Option(request.getHeader("Authorization")).map(_.trim).filter(_.nonEmpty) match {
+      case None => Left(ChallengeError.None_)
+      case Some(header) if header.regionMatches(true, 0, "Bearer ", 0, 7) =>
+        bearerCaller(header.substring(7).trim)
+      case Some(header) if header.regionMatches(true, 0, "Basic ", 0, 6) =>
+        basicCaller(header.substring(6).trim)
+      case Some(_) => Left(ChallengeError.InvalidRequest)
+    }
+
+  private def bearerCaller(token: String): Either[ChallengeError, AuthenticatedCaller] =
+    oauthConfig match {
+      case None => Left(ChallengeError.InvalidToken)
+      case Some(_) if token.isEmpty => Left(ChallengeError.InvalidRequest)
+      case Some(config) =>
+        OAuthStore.resolveAccessToken(oauthConn, token, now()) match {
+          case Left(_) => Left(ChallengeError.InvalidToken)
+          // The grant records which resource it was minted for, and that is
+          // only a fact in a table until it is compared with the resource this
+          // server actually is. A token outlives the request that created it:
+          // a reconfigured deployment, or a neighbouring one, hands over a
+          // perfectly valid unexpired credential for somewhere else. Refused
+          // here, before any tool is chosen, and reported exactly like any
+          // other unusable token so it reveals nothing.
+          case Right(grant) if grant.resource != config.resource =>
+            Left(ChallengeError.InvalidToken)
+          case Right(grant) =>
+            implicit val s = Database.getSession(request)
+            // The account is resolved now, not trusted from the grant row: an
+            // account removed or disabled since consent must stop working
+            // here, without waiting for the grant to be revoked.
+            getAccountByUserName(grant.userName, includeRemoved = false) match {
+              case Some(account) => Right(AuthenticatedCaller.oauth(account, grant))
+              case None => Left(ChallengeError.InvalidToken)
+            }
+        }
+    }
+
+  private def basicCaller(encoded: String): Either[ChallengeError, AuthenticatedCaller] =
+    try {
+      val decoded = new String(Base64.getDecoder.decode(encoded), "UTF-8")
+      val colon = decoded.indexOf(':')
+      if (colon < 0) Left(ChallengeError.InvalidRequest)
+      else {
         implicit val session = Database.getSession(request)
         val settings = loadSystemSettings()
-        authenticate(settings, username, password)
-      } catch {
-        case _: Exception => None
+        authenticate(settings, decoded.substring(0, colon), decoded.substring(colon + 1)) match {
+          case Some(account) => Right(AuthenticatedCaller.basic(account))
+          case None => Left(ChallengeError.InvalidToken)
+        }
       }
+    } catch {
+      case _: Exception => Left(ChallengeError.InvalidRequest)
     }
 }

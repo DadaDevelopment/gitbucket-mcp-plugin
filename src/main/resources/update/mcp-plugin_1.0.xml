@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Storage for OAuth grants issued by this plugin.
+
+  The root element is a bare <changeSet>, which is Solidbase's format rather
+  than Liquibase's: GitBucket runs plugin migrations through Solidbase, which
+  wraps this file in its own <databaseChangeLog> and supplies the change set's
+  id and author. A file carrying its own <databaseChangeLog> root parses as a
+  nested one and the migration is skipped.
+
+  Three tables rather than one, because the three objects have different
+  lifetimes and different revocation semantics. A grant is what the user
+  consented to and outlives both credential types; a code lives for a minute
+  and is consumed once; an access token lives for an hour and there may be
+  several per grant.
+
+  Liquibase change elements rather than hand-written DDL so the same file
+  produces correct types on H2 and PostgreSQL, which are the two backends
+  GitBucket deployments actually use.
+-->
+<changeSet>
+
+  <!-- One consent decision: this user, for this client, at this resource. -->
+  <createTable tableName="MCP_OAUTH_GRANT">
+    <column name="GRANT_ID" type="varchar(64)" nullable="false"/>
+    <column name="USER_NAME" type="varchar(100)" nullable="false"/>
+    <!-- A client ID metadata document URL; there is no client table. -->
+    <column name="CLIENT_ID" type="varchar(500)" nullable="false"/>
+    <column name="RESOURCE" type="varchar(500)" nullable="false"/>
+    <column name="SCOPES" type="varchar(200)" nullable="false"/>
+    <column name="REVOKED" type="boolean" nullable="false" defaultValueBoolean="false"/>
+    <column name="CREATED_AT" type="timestamp" nullable="false"/>
+    <column name="UPDATED_AT" type="timestamp" nullable="false"/>
+  </createTable>
+
+  <addPrimaryKey constraintName="IDX_MCP_OAUTH_GRANT_PK" tableName="MCP_OAUTH_GRANT"
+                 columnNames="GRANT_ID"/>
+
+  <createIndex tableName="MCP_OAUTH_GRANT" indexName="IDX_MCP_OAUTH_GRANT_USER">
+    <column name="USER_NAME"/>
+  </createIndex>
+
+  <!-- Authorization codes. Short-lived, single use, one per authorization. -->
+  <createTable tableName="MCP_OAUTH_CODE">
+    <column name="CODE_HASH" type="varchar(64)" nullable="false"/>
+    <column name="GRANT_ID" type="varchar(64)" nullable="false"/>
+    <!-- PKCE S256 challenge, bound at authorization, checked at exchange. -->
+    <column name="CODE_CHALLENGE" type="varchar(200)" nullable="false"/>
+    <!-- The exact redirect URI sent to /authorize, re-checked at /token. -->
+    <column name="REDIRECT_URI" type="varchar(500)" nullable="false"/>
+    <column name="EXPIRES_AT" type="timestamp" nullable="false"/>
+    <column name="CONSUMED" type="boolean" nullable="false" defaultValueBoolean="false"/>
+  </createTable>
+
+  <addPrimaryKey constraintName="IDX_MCP_OAUTH_CODE_PK" tableName="MCP_OAUTH_CODE"
+                 columnNames="CODE_HASH"/>
+
+  <createIndex tableName="MCP_OAUTH_CODE" indexName="IDX_MCP_OAUTH_CODE_GRANT">
+    <column name="GRANT_ID"/>
+  </createIndex>
+
+  <!--
+    Refresh tokens, as a chain rather than a column on the grant.
+
+    A superseded token has to leave a trace: replay detection is the whole
+    reason rotation is worth doing, and a grant that only remembers its
+    current refresh hash cannot tell a replayed old token from a string that
+    was never issued. Each rotation marks its row and inserts the successor,
+    so every token this grant ever had is still recognisable.
+  -->
+  <createTable tableName="MCP_OAUTH_REFRESH">
+    <column name="TOKEN_HASH" type="varchar(64)" nullable="false"/>
+    <column name="GRANT_ID" type="varchar(64)" nullable="false"/>
+    <column name="EXPIRES_AT" type="timestamp" nullable="false"/>
+    <!-- True once this token has been exchanged for its successor. -->
+    <column name="ROTATED" type="boolean" nullable="false" defaultValueBoolean="false"/>
+    <column name="CREATED_AT" type="timestamp" nullable="false"/>
+  </createTable>
+
+  <addPrimaryKey constraintName="IDX_MCP_OAUTH_REFRESH_PK" tableName="MCP_OAUTH_REFRESH"
+                 columnNames="TOKEN_HASH"/>
+
+  <createIndex tableName="MCP_OAUTH_REFRESH" indexName="IDX_MCP_OAUTH_REFRESH_GRANT">
+    <column name="GRANT_ID"/>
+  </createIndex>
+
+  <!-- Access tokens. Opaque, stored hashed, several may exist per grant. -->
+  <createTable tableName="MCP_OAUTH_TOKEN">
+    <column name="TOKEN_HASH" type="varchar(64)" nullable="false"/>
+    <column name="GRANT_ID" type="varchar(64)" nullable="false"/>
+    <column name="EXPIRES_AT" type="timestamp" nullable="false"/>
+    <column name="CREATED_AT" type="timestamp" nullable="false"/>
+  </createTable>
+
+  <addPrimaryKey constraintName="IDX_MCP_OAUTH_TOKEN_PK" tableName="MCP_OAUTH_TOKEN"
+                 columnNames="TOKEN_HASH"/>
+
+  <createIndex tableName="MCP_OAUTH_TOKEN" indexName="IDX_MCP_OAUTH_TOKEN_GRANT">
+    <column name="GRANT_ID"/>
+  </createIndex>
+
+</changeSet>
