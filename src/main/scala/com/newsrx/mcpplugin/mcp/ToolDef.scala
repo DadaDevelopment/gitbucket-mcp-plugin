@@ -138,6 +138,11 @@ object ToolRegistry {
       new CloseIssueTool,
       new ReopenIssueTool,
       new AddIssueCommentTool,
+      // Milestone tools
+      new GetMilestoneTool,
+      new ListMilestonesTool,
+      new CreateMilestoneTool,
+      new UpdateMilestoneTool,
       // Repository tools
       new ListRepositoriesTool,
       new GetRepositoryTool
