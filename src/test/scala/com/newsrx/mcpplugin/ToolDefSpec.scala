@@ -31,6 +31,10 @@ class ToolDefSpec extends AnyFunSuite with Matchers {
     names should contain("close_issue")
     names should contain("reopen_issue")
     names should contain("add_issue_comment")
+    names should contain("get_milestone")
+    names should contain("list_milestones")
+    names should contain("create_milestone")
+    names should contain("update_milestone")
     // Repo tools
     names should contain("list_repositories")
     names should contain("get_repository")

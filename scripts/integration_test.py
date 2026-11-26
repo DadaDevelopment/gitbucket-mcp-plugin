@@ -7,7 +7,7 @@ Usage:
 
 Expects a running GitBucket instance with the plugin deployed.
 Fresh GitBucket auto-creates root/root; pass --user/--password to match.
-Creates test fixtures then exercises all 14 MCP tools via JSON-RPC HTTP.
+Creates test fixtures then exercises all 18 MCP tools via JSON-RPC HTTP.
 """
 
 import argparse
@@ -29,6 +29,11 @@ DEFAULT_PASSWORD = "root"
 GITBUCKET_VERSIONS = None  # filled in from args
 PASSED = []
 FAILED = []
+FIXTURE_ISSUE_BODY = "This is the issue body created by the integration test suite."
+EXPECTED_ISSUE_COMMENT_BODIES = (
+    "Integration test comment one",
+    "Integration test comment two",
+)
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
@@ -131,12 +136,17 @@ def create_test_fixtures(base_url: str, user: str, password: str) -> dict:
     # Create issue
     code, issue = api_post(base_url, f"/repos/{user}/mcp-test-repo/issues", {
         "title": "Test issue for MCP",
-        "body": "This is a test issue created by the integration test suite.",
+        "body": FIXTURE_ISSUE_BODY,
     }, auth)
     issue_number = issue.get("number", 1)
     print(f"  Issue #{issue_number} created (HTTP {code}).")
 
-    return {"repo": "mcp-test-repo", "owner": user, "issue": issue_number}
+    return {
+        "repo": "mcp-test-repo",
+        "owner": user,
+        "issue": issue_number,
+        "issue_body": FIXTURE_ISSUE_BODY,
+    }
 
 
 # ── MCP client ────────────────────────────────────────────────────────────────
@@ -216,10 +226,11 @@ def assert_json(response: dict) -> dict:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 
-def run_all_tests(mcp_url: str, auth: str, fixtures: dict):
+def run_all_tests(base_url: str, mcp_url: str, auth: str, fixtures: dict):
     owner = fixtures["owner"]
     repo = fixtures["repo"]
     issue_no = fixtures["issue"]
+    issue_body = fixtures["issue_body"]
 
     # ── Protocol ──────────────────────────────────────────────────────────────
 
@@ -242,6 +253,7 @@ def run_all_tests(mcp_url: str, auth: str, fixtures: dict):
         expected = {
             "list_repositories", "get_repository",
             "list_issues", "get_issue", "create_issue", "close_issue", "reopen_issue", "add_issue_comment",
+            "get_milestone", "list_milestones", "create_milestone", "update_milestone",
             "list_pull_requests", "get_pull_request", "add_pr_comment", "close_pull_request",
             "reopen_pull_request", "get_pr_diff",
         }
@@ -284,12 +296,18 @@ def run_all_tests(mcp_url: str, auth: str, fixtures: dict):
         resp = tool_call(mcp_url, auth, "list_issues", {"owner": owner, "repo": repo, "state": "open"})
         data = assert_json(resp)
         assert "issues" in data, f"Missing issues key: {data}"
+        issue = next((i for i in data["issues"] if i.get("number") == issue_no), None)
+        assert issue is not None, f"Issue missing from list_issues: {data}"
+        assert issue.get("body") == issue_body, f"Wrong issue body in list_issues: {issue}"
 
     def test_get_issue():
         resp = tool_call(mcp_url, auth, "get_issue", {"owner": owner, "repo": repo, "number": issue_no})
         data = assert_json(resp)
         assert data.get("number") == issue_no, f"Wrong issue number: {data}"
         assert "title" in data
+        assert data.get("body") == issue_body, f"Wrong issue body in get_issue: {data}"
+        assert data.get("comments") == [], f"Unexpected comments on new issue: {data}"
+        assert data.get("comment_count") == 0, f"Unexpected comment_count on new issue: {data}"
 
     def test_create_issue():
         resp = tool_call(mcp_url, auth, "create_issue", {
@@ -302,13 +320,41 @@ def run_all_tests(mcp_url: str, auth: str, fixtures: dict):
         assert data.get("state") == "open"
 
     def test_add_issue_comment():
-        resp = tool_call(mcp_url, auth, "add_issue_comment", {
-            "owner": owner, "repo": repo,
-            "number": issue_no,
-            "body": "Integration test comment",
-        })
-        data = assert_json(resp)
-        assert "comment_id" in data, f"Missing comment_id: {data}"
+        for body in EXPECTED_ISSUE_COMMENT_BODIES:
+            resp = tool_call(mcp_url, auth, "add_issue_comment", {
+                "owner": owner, "repo": repo,
+                "number": issue_no,
+                "body": body,
+            })
+            data = assert_json(resp)
+            assert "comment_id" in data, f"Missing comment_id: {data}"
+
+        issue = assert_json(tool_call(mcp_url, auth, "get_issue", {
+            "owner": owner, "repo": repo, "number": issue_no,
+        }))
+        comments = issue.get("comments", [])
+        comment_bodies = [comment.get("body") for comment in comments]
+        assert sorted(comment_bodies) == sorted(EXPECTED_ISSUE_COMMENT_BODIES), \
+            f"get_issue did not return all comment bodies: {comments}"
+        assert issue.get("body") == issue_body, f"Wrong issue body in get_issue: {issue}"
+        assert issue.get("comment_count") == len(EXPECTED_ISSUE_COMMENT_BODIES), \
+            f"Incorrect comment_count in get_issue: {issue}"
+        assert issue.get("comment_count") == len(comments), f"Incorrect comment_count: {issue}"
+
+        listed = assert_json(tool_call(mcp_url, auth, "list_issues", {
+            "owner": owner, "repo": repo, "state": "open",
+        }))
+        listed_issue = next((i for i in listed["issues"] if i.get("number") == issue_no), None)
+        assert listed_issue is not None, f"Issue missing from list_issues: {listed}"
+        listed_comments = listed_issue.get("comments", [])
+        listed_comment_bodies = [comment.get("body") for comment in listed_comments]
+        assert sorted(listed_comment_bodies) == sorted(EXPECTED_ISSUE_COMMENT_BODIES), \
+            f"list_issues did not return all comment bodies: {listed_issue}"
+        assert listed_issue.get("body") == issue_body, f"Wrong issue body in list_issues: {listed_issue}"
+        assert listed_issue.get("comment_count") == len(EXPECTED_ISSUE_COMMENT_BODIES), \
+            f"Incorrect comment_count in list_issues: {listed_issue}"
+        assert listed_issue.get("comment_count") == len(listed_comments), \
+            f"Incorrect comment_count in list_issues: {listed_issue}"
 
     def test_close_and_reopen_issue():
         # Create a fresh issue to close/reopen
@@ -323,6 +369,74 @@ def run_all_tests(mcp_url: str, auth: str, fixtures: dict):
 
         reopen_resp = tool_call(mcp_url, auth, "reopen_issue", {"owner": owner, "repo": repo, "number": n})
         assert_ok(reopen_resp)
+
+    def test_milestone_lifecycle():
+        created = assert_json(tool_call(mcp_url, auth, "create_milestone", {
+            "owner": owner,
+            "repo": repo,
+            "title": "MCP milestone",
+            "description": "Milestone lifecycle integration test",
+            "due_date": "2026-12-01",
+        }))
+        number = created.get("number")
+        assert isinstance(number, int) and number > 0, f"Missing milestone number: {created}"
+        assert created.get("state") == "open", f"New milestone should be open: {created}"
+        assert created.get("description") == "Milestone lifecycle integration test"
+        assert created.get("due_date", "").startswith("2026-12-01"), f"Wrong due date: {created}"
+        assert created.get("open_issues") == 0 and created.get("closed_issues") == 0, \
+            f"New milestone should have no issues: {created}"
+
+        code, linked_issue = api_post(base_url, f"/repos/{owner}/{repo}/issues", {
+            "title": "Issue linked to MCP milestone",
+            "body": "Used to verify milestone issue counts.",
+            "milestone": number,
+        }, auth)
+        assert code in (200, 201), f"Failed to create milestone issue: HTTP {code}: {linked_issue}"
+        linked_issue_number = linked_issue.get("number")
+        assert isinstance(linked_issue_number, int), f"Missing linked issue number: {linked_issue}"
+
+        fetched = assert_json(tool_call(mcp_url, auth, "get_milestone", {
+            "owner": owner, "repo": repo, "number": number,
+        }))
+        assert fetched.get("open_issues") == 1 and fetched.get("closed_issues") == 0, \
+            f"Incorrect counts for milestone with an open issue: {fetched}"
+
+        updated = assert_json(tool_call(mcp_url, auth, "update_milestone", {
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "title": "Updated MCP milestone",
+            "description": "Updated description",
+            "due_date": "2026-12-15",
+            "state": "closed",
+        }))
+        assert updated.get("title") == "Updated MCP milestone", f"Milestone title was not updated: {updated}"
+        assert updated.get("description") == "Updated description"
+        assert updated.get("state") == "closed", f"Milestone was not closed: {updated}"
+
+        listed_closed = assert_json(tool_call(mcp_url, auth, "list_milestones", {
+            "owner": owner, "repo": repo, "state": "closed",
+        }))
+        assert any(item.get("number") == number for item in listed_closed.get("milestones", [])), \
+            f"Closed milestone missing from list: {listed_closed}"
+
+        assert_ok(tool_call(mcp_url, auth, "close_issue", {
+            "owner": owner, "repo": repo, "number": linked_issue_number,
+        }))
+        closed_counts = assert_json(tool_call(mcp_url, auth, "get_milestone", {
+            "owner": owner, "repo": repo, "number": number,
+        }))
+        assert closed_counts.get("open_issues") == 0 and closed_counts.get("closed_issues") == 1, \
+            f"Milestone issue counts did not update after closing issue: {closed_counts}"
+
+        reopened = assert_json(tool_call(mcp_url, auth, "update_milestone", {
+            "owner": owner, "repo": repo, "number": number, "state": "open",
+        }))
+        assert reopened.get("state") == "open", f"Milestone was not reopened: {reopened}"
+        missing = tool_call(mcp_url, auth, "get_milestone", {
+            "owner": owner, "repo": repo, "number": 99999,
+        })
+        assert "error" in missing, f"Expected error for missing milestone: {missing}"
 
     # ── PR tools ──────────────────────────────────────────────────────────────
 
@@ -358,6 +472,9 @@ def run_all_tests(mcp_url: str, auth: str, fixtures: dict):
     run_test("add_issue_comment",          test_add_issue_comment)
     run_test("close_issue / reopen_issue", test_close_and_reopen_issue)
     run_test("get_issue (not found)",      test_get_issue_not_found)
+
+    print("\n[Milestone tools]")
+    run_test("milestone lifecycle", test_milestone_lifecycle)
 
     print("\n[Pull request tools]")
     run_test("list_pull_requests",      test_list_pull_requests)
@@ -395,7 +512,7 @@ def main():
         print(f"ERROR: Failed to create test fixtures: {e}")
         sys.exit(1)
 
-    run_all_tests(mcp_url, auth, fixtures)
+    run_all_tests(base_url, mcp_url, auth, fixtures)
 
     total = len(PASSED) + len(FAILED)
     print(f"\n=== Results: {len(PASSED)}/{total} passed ===")

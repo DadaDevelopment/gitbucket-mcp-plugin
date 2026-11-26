@@ -106,6 +106,37 @@ class ToolArgParseSpec extends AnyFunSuite with Matchers {
     requiredFields("add_issue_comment") should contain allOf ("owner", "repo", "number", "body")
   }
 
+  // ── Milestone tools ───────────────────────────────────────────────────────
+
+  test("get_milestone requires owner, repo and number") {
+    requiredFields("get_milestone") shouldBe Set("owner", "repo", "number")
+  }
+
+  test("list_milestones has owner and repo required with open/closed/all state") {
+    requiredFields("list_milestones") shouldBe Set("owner", "repo")
+    val schema = ToolRegistry.find("list_milestones", mapper).get.inputSchema(mapper)
+    val state = schema.get("properties").get("state")
+    val values = (0 until state.get("enum").size).map(state.get("enum").get(_).asText()).toSet
+    values shouldBe Set("open", "closed", "all")
+  }
+
+  test("create_milestone requires owner, repo and title") {
+    requiredFields("create_milestone") shouldBe Set("owner", "repo", "title")
+    propertyNames("create_milestone") should contain allOf ("description", "due_date")
+  }
+
+  test("update_milestone requires owner, repo and number with optional fields") {
+    requiredFields("update_milestone") shouldBe Set("owner", "repo", "number")
+    propertyNames("update_milestone") should contain allOf ("title", "description", "due_date", "state")
+  }
+
+  test("update_milestone state is an open/closed enum") {
+    val schema = ToolRegistry.find("update_milestone", mapper).get.inputSchema(mapper)
+    val state = schema.get("properties").get("state")
+    val values = (0 until state.get("enum").size).map(state.get("enum").get(_).asText()).toSet
+    values shouldBe Set("open", "closed")
+  }
+
   // ── list_repositories ─────────────────────────────────────────────────────
 
   test("list_repositories requires owner") {

@@ -157,7 +157,7 @@ class MCPController
 
     val serverInfo = mapper.createObjectNode()
     serverInfo.put("name",    "gitbucket-mcp-plugin")
-    serverInfo.put("version", "0.1.0")
+    serverInfo.put("version", "0.1.2")
 
     root.set[ObjectNode]("capabilities", capabilities)
     root.set[ObjectNode]("serverInfo",   serverInfo)

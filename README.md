@@ -1,15 +1,16 @@
 # gitbucket-mcp-plugin
 
-[![Unit Tests](https://github.com/DADA-TUDA/gitbucket-mcp-plugin/actions/workflows/test.yml/badge.svg)](https://github.com/DADA-TUDA/gitbucket-mcp-plugin/actions/workflows/test.yml)
-[![Integration Tests](https://github.com/DADA-TUDA/gitbucket-mcp-plugin/actions/workflows/integration.yml/badge.svg)](https://github.com/DADA-TUDA/gitbucket-mcp-plugin/actions/workflows/integration.yml)
-[![Latest Release](https://img.shields.io/github/v/release/DADA-TUDA/gitbucket-mcp-plugin)](https://github.com/DADA-TUDA/gitbucket-mcp-plugin/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
+## Fork and extensions
+
+This repository is a feature-extended fork of [DadaDevelopment/gitbucket-mcp-plugin](https://github.com/DadaDevelopment/gitbucket-mcp-plugin), maintained by [hide-san-45](https://github.com/hide-san-45). It builds on the original GitBucket MCP plugin with additional features. For the upstream project, see the [original repository](https://github.com/DadaDevelopment/gitbucket-mcp-plugin).
 
 A [GitBucket](https://github.com/gitbucket/gitbucket) plugin that embeds a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server directly inside GitBucket. AI coding assistants (Claude, Cursor, VS Code Copilot, etc.) can read and manage your GitBucket repositories, issues, and pull requests over MCP — no separate service or proxy required.
 
 ## Features
 
-14 MCP tools covering the most common developer workflows:
+18 MCP tools covering the most common developer workflows:
 
 ### Repository tools
 
@@ -22,12 +23,21 @@ A [GitBucket](https://github.com/gitbucket/gitbucket) plugin that embeds a [Mode
 
 | Tool | Description |
 |------|-------------|
-| `list_issues` | List issues in a repository (open / closed / all) |
-| `get_issue` | Get issue details and comment count |
+| `list_issues` | List issues with comments, labels, assignees, milestone, and priority (open / closed / all) |
+| `get_issue` | Get all issue fields, comments, and related metadata |
 | `create_issue` | Create a new issue |
 | `close_issue` | Close an issue with an optional comment |
 | `reopen_issue` | Reopen a closed issue |
 | `add_issue_comment` | Add a comment to an issue |
+
+### Milestone tools
+
+| Tool | Description |
+|------|-------------|
+| `get_milestone` | Get milestone details, state, due date, and open/closed issue counts |
+| `list_milestones` | List repository milestones by state (open / closed / all) |
+| `create_milestone` | Create a milestone with an optional description and due date |
+| `update_milestone` | Update milestone details or open/close it |
 
 ### Pull request tools
 
@@ -49,7 +59,7 @@ A [GitBucket](https://github.com/gitbucket/gitbucket) plugin that embeds a [Mode
 
 ### Option A — Download a release JAR
 
-1. Go to [Releases](https://github.com/DADA-TUDA/gitbucket-mcp-plugin/releases) and download the latest `.jar`.
+1. Go to [Releases](https://github.com/hide-san-45/gitbucket-mcp-plugin/releases) and download the latest `.jar`.
 2. Copy it to your GitBucket plugins directory:
    ```bash
    cp gitbucket-mcp-plugin-*.jar $GITBUCKET_HOME/plugins/
@@ -59,7 +69,7 @@ A [GitBucket](https://github.com/gitbucket/gitbucket) plugin that embeds a [Mode
 ### Option B — Build from source
 
 ```bash
-git clone https://github.com/DADA-TUDA/gitbucket-mcp-plugin.git
+git clone https://github.com/hide-san-45/gitbucket-mcp-plugin.git
 cd gitbucket-mcp-plugin
 ./gradlew shadowJar
 cp build/libs/gitbucket-mcp-plugin-*.jar $GITBUCKET_HOME/plugins/
@@ -137,7 +147,9 @@ npx @modelcontextprotocol/inspector \
 
 | GitBucket | Status | Notes |
 |-----------|--------|-------|
-| 4.46.0 | ✅ Supported | Current target |
+| 4.48.0 | ✅ Supported | Current target |
+| 4.47.0 | ✅ Supported | |
+| 4.46.0 | ✅ Supported | |
 | 4.45.0 | ✅ Supported | |
 | 4.44.0 | ✅ Supported | |
 | 4.43.0 | ✅ Supported | H2 1.x → 2.x DB migration (no plugin API change) |
@@ -158,7 +170,7 @@ npx @modelcontextprotocol/inspector \
 ./gradlew test
 ```
 
-55 tests covering JSON-RPC protocol parsing, tool registry, schema validation, and argument parsing.
+Unit tests cover JSON-RPC protocol parsing, tool registration, schema validation, argument parsing, and milestone serialization.
 
 ### Integration tests
 
@@ -171,7 +183,7 @@ cp build/libs/gitbucket-mcp-plugin-*.jar $GITBUCKET_HOME/plugins/
 python3 scripts/integration_test.py --host localhost --port 8080 --user root --password root
 ```
 
-The script creates test fixtures, exercises all 14 tools, and reports a pass/fail summary.
+The script creates test fixtures, exercises the MCP tools, including milestone lifecycle operations, and reports a pass/fail summary.
 
 ## Contributing
 

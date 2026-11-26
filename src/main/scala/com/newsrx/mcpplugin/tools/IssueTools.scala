@@ -3,7 +3,7 @@ package com.newsrx.mcpplugin.tools
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.newsrx.mcpplugin.mcp.ToolDef
-import gitbucket.core.model.{Account, Issue}
+import gitbucket.core.model.{Account, Issue, IssueAssignee, IssueComment, Label, Milestone, Priority}
 import gitbucket.core.service.{AccountService, IssuesService, LabelsService, MilestonesService, PrioritiesService, RepositoryService}
 import gitbucket.core.service.IssuesService.IssueSearchCondition
 import javax.servlet.http.HttpServletRequest
@@ -20,16 +20,102 @@ private[tools] trait IssueService
     with SessionSupport
 
 private[tools] object IssueJson {
-  def issueNode(mapper: ObjectMapper, issue: Issue): ObjectNode = {
+  def issueNode(
+      mapper: ObjectMapper,
+      issue: Issue,
+      comments: Seq[IssueComment],
+      labels: Seq[Label],
+      assignees: Seq[IssueAssignee],
+      milestone: Option[Milestone],
+      priority: Option[Priority]
+  ): ObjectNode = {
     val n = mapper.createObjectNode()
     n.put("number",     issue.issueId)
+    n.put("owner",      issue.userName)
+    n.put("repo",       issue.repositoryName)
     n.put("title",      issue.title)
     n.put("body",       issue.content.getOrElse(""))
     n.put("state",      if (issue.closed) "closed" else "open")
+    n.put("closed",     issue.closed)
     n.put("author",     issue.openedUserName)
     n.put("is_pr",      issue.isPullRequest)
     n.put("created_at", issue.registeredDate.toString)
     n.put("updated_at", issue.updatedDate.toString)
+    issue.milestoneId match {
+      case Some(id) => n.put("milestone_id", id)
+      case None     => n.putNull("milestone_id")
+    }
+    issue.priorityId match {
+      case Some(id) => n.put("priority_id", id)
+      case None     => n.putNull("priority_id")
+    }
+
+    val commentNodes = mapper.createArrayNode()
+    comments.foreach { comment =>
+      val commentNode = mapper.createObjectNode()
+      commentNode.put("id",         comment.commentId)
+      commentNode.put("action",     comment.action)
+      commentNode.put("author",     comment.commentedUserName)
+      commentNode.put("body",       comment.content)
+      commentNode.put("created_at", comment.registeredDate.toString)
+      commentNode.put("updated_at", comment.updatedDate.toString)
+      commentNodes.add(commentNode)
+    }
+    n.put("comment_count", comments.size)
+    n.set[com.fasterxml.jackson.databind.node.ArrayNode]("comments", commentNodes)
+
+    val labelNodes = mapper.createArrayNode()
+    labels.foreach { label =>
+      val labelNode = mapper.createObjectNode()
+      labelNode.put("id",         label.labelId)
+      labelNode.put("name",       label.labelName)
+      labelNode.put("color",      label.color)
+      labelNode.put("font_color", label.fontColor)
+      labelNodes.add(labelNode)
+    }
+    n.set[com.fasterxml.jackson.databind.node.ArrayNode]("labels", labelNodes)
+
+    val assigneeNodes = mapper.createArrayNode()
+    assignees.foreach(assignee => assigneeNodes.add(assignee.assigneeUserName))
+    n.set[com.fasterxml.jackson.databind.node.ArrayNode]("assignees", assigneeNodes)
+
+    milestone match {
+      case Some(value) =>
+        val milestoneNode = mapper.createObjectNode()
+        milestoneNode.put("id",    value.milestoneId)
+        milestoneNode.put("title", value.title)
+        value.description match {
+          case Some(description) => milestoneNode.put("description", description)
+          case None              => milestoneNode.putNull("description")
+        }
+        value.dueDate match {
+          case Some(date) => milestoneNode.put("due_date", date.toString)
+          case None       => milestoneNode.putNull("due_date")
+        }
+        value.closedDate match {
+          case Some(date) => milestoneNode.put("closed_at", date.toString)
+          case None       => milestoneNode.putNull("closed_at")
+        }
+        n.set[ObjectNode]("milestone", milestoneNode)
+      case None => n.putNull("milestone")
+    }
+
+    priority match {
+      case Some(value) =>
+        val priorityNode = mapper.createObjectNode()
+        priorityNode.put("id",          value.priorityId)
+        priorityNode.put("name",        value.priorityName)
+        value.description match {
+          case Some(description) => priorityNode.put("description", description)
+          case None              => priorityNode.putNull("description")
+        }
+        priorityNode.put("is_default",  value.isDefault)
+        priorityNode.put("ordering",    value.ordering)
+        priorityNode.put("color",       value.color)
+        priorityNode.put("font_color",  value.fontColor)
+        n.set[ObjectNode]("priority", priorityNode)
+      case None => n.putNull("priority")
+    }
     n
   }
 }
@@ -38,7 +124,7 @@ private[tools] object IssueJson {
 
 class ListIssuesTool extends ToolDef with IssueService {
   val name        = "list_issues"
-  val description = "List issues in a GitBucket repository (excludes pull requests)"
+  val description = "List issues with comments and related metadata (excludes pull requests)"
 
   def inputSchema(mapper: ObjectMapper) = objectSchema(
     mapper,
@@ -67,7 +153,18 @@ class ListIssuesTool extends ToolDef with IssueService {
     val all = searchIssueByApi(condition, 0, limit, (owner, repo))
     val arr = mapper.createArrayNode()
     all.foreach { t =>
-      if (!t._1.isPullRequest) arr.add(IssueJson.issueNode(mapper, t._1))
+      if (!t._1.isPullRequest) {
+        val issue = t._1
+        arr.add(IssueJson.issueNode(
+          mapper,
+          issue,
+          getComments(owner, repo, issue.issueId),
+          getIssueLabels(owner, repo, issue.issueId),
+          getIssueAssignees(owner, repo, issue.issueId),
+          issue.milestoneId.flatMap(id => getMilestone(owner, repo, id)),
+          issue.priorityId.flatMap(id => getPriority(owner, repo, id))
+        ))
+      }
     }
 
     val root = mapper.createObjectNode()
@@ -81,7 +178,7 @@ class ListIssuesTool extends ToolDef with IssueService {
 
 class GetIssueTool extends ToolDef with IssueService {
   val name        = "get_issue"
-  val description = "Get details of a specific issue"
+  val description = "Get all issue fields, comments, and related metadata"
 
   def inputSchema(mapper: ObjectMapper) = objectSchema(
     mapper,
@@ -102,8 +199,15 @@ class GetIssueTool extends ToolDef with IssueService {
       case None =>
         throw new NoSuchElementException(s"issue #$number not found in $owner/$repo")
       case Some(issue) =>
-        val node = IssueJson.issueNode(mapper, issue)
-        node.put("comment_count", getComments(owner, repo, number).size)
+        val node = IssueJson.issueNode(
+          mapper,
+          issue,
+          getComments(owner, repo, issue.issueId),
+          getIssueLabels(owner, repo, issue.issueId),
+          getIssueAssignees(owner, repo, issue.issueId),
+          issue.milestoneId.flatMap(id => getMilestone(owner, repo, id)),
+          issue.priorityId.flatMap(id => getPriority(owner, repo, id))
+        )
         jsonContent(mapper, node)
     }
   }
